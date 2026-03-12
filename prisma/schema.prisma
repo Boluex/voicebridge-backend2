@@ -1,0 +1,242 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Platform Users (business owners) ───────────────────────────────────────
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String?
+  name         String
+  clerkId      String?    @unique
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  businesses   Business[]
+}
+
+// ─── Registered Businesses ───────────────────────────────────────────────────
+model Business {
+  id              String            @id @default(cuid())
+  userId          String
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Identity
+  name            String
+  slug            String            @unique
+  category        BusinessCategory
+  description     String?
+  logoUrl         String?
+
+  // Contact & location
+  phone           String?
+  email           String?
+  address         String?
+  city            String?
+  country         String            @default("NG")
+  deliveryRadius  Int               @default(5)
+  lat             Float?
+  lng             Float?
+
+  // Operating hours (JSON: { mon: { open: "08:00", close: "22:00" }, ... })
+  operatingHours  Json?
+
+  // ElevenLabs agent config
+  agentId         String?
+  agentName       String            @default("Ava")
+  agentGender     String            @default("female")
+  agentVoiceId    String            @default("21m00Tcm4TlvDq8ikWAM")
+  agentGreeting   String            @default("Hello! How can I help you today?")
+  agentTone       String            @default("friendly")
+  primaryLanguage String            @default("en")
+  multilingualOn  Boolean           @default(true)
+  recordCalls     Boolean           @default(true)
+  autoEscalate    Boolean           @default(true)
+  aiPhoneNumber   String?
+
+  // Payment
+  paystackPublicKey  String?
+  paystackSecretKey  String?
+  orderWebhookUrl    String?
+  notificationEmail  String?
+  escalationPhone    String?
+
+  // Subscription / Plan
+  plan                 Plan              @default(STARTER)
+  subscriptionStatus   String            @default("trial")
+  subscriptionPlan     String?
+  subscriptionExpiry   DateTime?
+  trialEndsAt          DateTime?
+  isActive             Boolean           @default(true)
+
+  // Agent schedule & billing
+  agentScheduleType    String?           @default("always_on") // always_on | scheduled
+  agentActiveDays      Json?             // ["mon","tue","wed","thu","fri","sat","sun"]
+  agentStartTime       String?           // "08:00"
+  agentEndTime         String?           // "22:00"
+  lastBilledAt         DateTime?
+  billingCycleStart    DateTime?
+
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  // Relations
+  knowledgeSources KnowledgeSource[]
+  catalogItems     CatalogItem[]
+  calls            Call[]
+  orders           Order[]
+}
+
+// ─── Knowledge Base ───────────────────────────────────────────────────────────
+model KnowledgeSource {
+  id          String       @id @default(cuid())
+  businessId  String
+  business    Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  type        SourceType
+  name        String
+  source      String?
+  content     String?
+  fileUrl     String?
+  fileSize    Int?
+  chunkCount  Int          @default(0)
+  status      SourceStatus @default(PROCESSING)
+
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+// ─── Business Catalogue ───────────────────────────────────────────────────────
+model CatalogItem {
+  id          String      @id @default(cuid())
+  businessId  String
+  business    Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+  price       Float
+  currency    String      @default("NGN")
+  category    String?
+  imageUrl    String?
+  inStock     Boolean     @default(true)
+  available   Boolean     @default(true)
+
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+}
+
+// ─── Call Records ─────────────────────────────────────────────────────────────
+model Call {
+  id               String      @id @default(cuid())
+  businessId       String
+  business         Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  callerNumber     String
+  callerName       String?
+  duration         Int?
+  status           CallStatus
+  intent           String?
+  language         String      @default("en")
+  transcript       String?
+  summary          String?
+  recordingUrl     String?
+  elevenlabsCallId String?
+
+  startedAt        DateTime    @default(now())
+  endedAt          DateTime?
+  createdAt        DateTime    @default(now())
+
+  orders           Order[]
+}
+
+// ─── Orders ───────────────────────────────────────────────────────────────────
+model Order {
+  id              String       @id @default(cuid())
+  businessId      String
+  business        Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  callId          String?
+  call            Call?        @relation(fields: [callId], references: [id])
+
+  customerName    String?
+  customerEmail   String?
+  customerPhone   String?
+  deliveryAddress String?
+
+  items           Json
+  subtotal        Float
+  currency        String       @default("NGN")
+
+  paystackRef      String?      @unique
+  paystackLinkUrl  String?
+  paystackLinkCode String?
+
+  status          OrderStatus  @default(PENDING_PAYMENT)
+  paidAt          DateTime?
+  notifiedBiz     Boolean      @default(false)
+
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+enum Plan {
+  STARTER
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum BusinessCategory {
+  RESTAURANT
+  CAFE
+  BAKERY
+  PHARMACY
+  SALON
+  BARBERSHOP
+  PLUMBER
+  ELECTRICIAN
+  CLEANING
+  HOTEL
+  GYM
+  CLINIC
+  DENTAL
+  GROCERY
+  FASHION
+  OTHER
+}
+
+enum SourceType {
+  URL
+  PDF
+  FAQ
+  DOCX
+  CSV
+  TXT
+  IMAGE
+  XLSX
+}
+
+enum SourceStatus {
+  PROCESSING
+  INDEXED
+  ERROR
+}
+
+enum CallStatus {
+  COMPLETED
+  ESCALATED
+  MISSED
+  FAILED
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PROCESSING
+  DELIVERED
+  CANCELLED
+  FAILED
+}
