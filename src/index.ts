@@ -21,7 +21,7 @@ import billingRouter from './routes/billing.js'
 
 // Webhooks (raw body needed)
 import paystackWebhook from './webhooks/paystack.js'
-import elevenlabsWebhook from './webhooks/elevenlabs.js'
+import { default as elevenlabsWebhook } from './webhooks/elevenlabs.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname  = path.dirname(__filename)

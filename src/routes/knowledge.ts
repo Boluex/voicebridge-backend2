@@ -62,13 +62,12 @@ router.post('/:businessId/url', async (req: AuthRequest, res: Response) => {
     data: { businessId: req.params.businessId, type: 'URL', name: url, source: url, status: 'PROCESSING' },
   })
 
-  // Background processing
   processSource(source.id, 'url', url, req.params.businessId).catch(console.error)
 
   res.status(201).json({ source })
 })
 
-// POST /api/knowledge/:businessId/file  (PDF, DOCX, CSV, TXT, images)
+// POST /api/knowledge/:businessId/file
 router.post('/:businessId/file', upload.single('file'), async (req: AuthRequest, res: Response) => {
   if (!(await ownsBusiness(req.user!.id, req.params.businessId))) {
     res.status(403).json({ error: 'Forbidden' }); return
@@ -77,7 +76,6 @@ router.post('/:businessId/file', upload.single('file'), async (req: AuthRequest,
 
   const ext  = path.extname(req.file.originalname).toLowerCase().replace('.', '').toUpperCase()
   const imageExts = ['JPG', 'JPEG', 'PNG', 'WEBP', 'GIF']
-  // Map DOC → DOCX (DOC is not a separate enum value)
   const normalizedExt = ext === 'DOC' ? 'DOCX' : ext
   const type = imageExts.includes(normalizedExt)
     ? ('IMAGE' as any)
@@ -87,11 +85,11 @@ router.post('/:businessId/file', upload.single('file'), async (req: AuthRequest,
     data: {
       businessId: req.params.businessId,
       type,
-      name:    req.file.originalname.replace(/\.[^.]+$/, ''),
-      source:  req.file.originalname,
-      fileUrl: `/uploads/${req.file.filename}`,
+      name:     req.file.originalname.replace(/\.[^.]+$/, ''),
+      source:   req.file.originalname,
+      fileUrl:  `/uploads/${req.file.filename}`,
       fileSize: req.file.size,
-      status:  'PROCESSING',
+      status:   'PROCESSING',
     },
   })
 
@@ -119,10 +117,22 @@ router.post('/:businessId/faq', async (req: AuthRequest, res: Response) => {
     },
   })
 
-  // Push updated knowledge to ElevenLabs
   pushKnowledgeToAgent(req.params.businessId).catch(console.error)
 
   res.status(201).json({ source })
+})
+
+// GET /api/knowledge/:businessId/:sourceId/content  — returns extracted text for preview
+router.get('/:businessId/:sourceId/content', async (req: AuthRequest, res: Response) => {
+  if (!(await ownsBusiness(req.user!.id, req.params.businessId))) {
+    res.status(403).json({ error: 'Forbidden' }); return
+  }
+  const source = await prisma.knowledgeSource.findFirst({
+    where:  { id: req.params.sourceId, businessId: req.params.businessId },
+    select: { id: true, type: true, name: true, source: true, content: true, status: true, chunkCount: true },
+  })
+  if (!source) { res.status(404).json({ error: 'Not found' }); return }
+  res.json({ source })
 })
 
 // DELETE /api/knowledge/:businessId/:sourceId
@@ -158,8 +168,6 @@ async function processSource(sourceId: string, type: string, inputPath: string, 
     })
 
     console.log(`[Knowledge] ✓ Indexed ${type} (${chunks} chunks) for business ${businessId}`)
-
-    // Push all indexed knowledge to ElevenLabs agent
     await pushKnowledgeToAgent(businessId)
 
   } catch (err) {
@@ -176,21 +184,19 @@ async function pushKnowledgeToAgent(businessId: string) {
     const [business, sources] = await Promise.all([
       prisma.business.findUnique({ where: { id: businessId } }),
       prisma.knowledgeSource.findMany({
-        where:   { businessId, status: 'INDEXED' },
-        select:  { type: true, name: true, content: true },
+        where:  { businessId, status: 'INDEXED' },
+        select: { type: true, name: true, content: true },
       }),
     ])
 
     if (!business?.agentId) return
 
-    // Build combined knowledge text (cap at 8000 chars for prompt)
     const combined = sources
       .filter(s => s.content)
       .map(s => `=== ${s.name} (${s.type}) ===\n${s.content}`)
       .join('\n\n')
       .slice(0, 8000)
 
-    // Update agent system prompt with new knowledge
     await updateElevenLabsAgent(business.agentId, business as any, combined)
     console.log(`[ElevenLabs] ✓ Agent ${business.agentId} updated with fresh knowledge`)
   } catch (err) {

@@ -21,8 +21,12 @@ export interface BusinessForAgent {
   category: string
   address?: string | null
   city?: string | null
+  country?: string | null
   phone?: string | null
   escalationPhone?: string | null
+  bankName?: string | null
+  accountName?: string | null
+  accountNumber?: string | null
 }
 
 function buildSystemPrompt(biz: BusinessForAgent, knowledgeContext = ''): string {
@@ -43,6 +47,7 @@ You answer questions, take orders, process payments, handle complaints, and tran
 - Category: ${biz.category}
 - Location: ${[biz.address, biz.city].filter(Boolean).join(', ') || 'Available on request'}
 - Phone: ${biz.phone || 'Available on request'}
+- Bank Details (for orders): ${biz.bankName || 'Not set'} - Account: ${biz.accountNumber || 'Not set'} (${biz.accountName || 'Not set'})
 
 ## Business Knowledge Base
 ${knowledgeContext || 'No specific knowledge loaded yet. Answer based on general business type.'}
@@ -50,16 +55,14 @@ ${knowledgeContext || 'No specific knowledge loaded yet. Answer based on general
 ## Your Tools (call when needed)
 1. lookup_catalogue — Search products/services and check availability
 2. create_order — After confirming items and delivery details, create an order
-3. send_payment_link — Generate Paystack payment link, send to caller email
-4. check_payment_status — Verify payment completion
-5. search_businesses — Find other VoiceBridge-registered businesses
+3. send_payment_link — Generate payment link and send it to the caller's email.
 
 ## Order Flow
 1. Identify what caller wants → call lookup_catalogue
 2. Confirm item available → collect: name, delivery address, email
-3. call create_order → call send_payment_link
-4. Tell caller: "I've sent a payment link to your email"
-5. Wait → call check_payment_status → confirm order
+3. call create_order 
+4. Call send_payment_link to generate and securely email the payment link.
+5. Tell the caller you have sent a secure checkout link to their email and ask them to complete it to confirm their order.
 
 ## Language
 - Primary: ${biz.primaryLanguage}
@@ -124,14 +127,14 @@ export async function createElevenLabsAgent(
         language: biz.primaryLanguage || 'en',
       },
       tts: {
-        model_id: 'eleven_turbo_v2_5',
+        model_id: 'eleven_turbo_v2',
         voice_id: biz.agentVoiceId,
         stability: 0.5,
         similarity_boost: 0.75,
       },
       stt: {
         provider: 'deepgram',
-        user_input_audio_format: 'ulaw_8000',
+        user_input_audio_format: 'pcm_16000',
       },
       turn: {
         turn_timeout: 7,
@@ -188,15 +191,7 @@ export async function createElevenLabsAgent(
         ['orderId'],
         backendUrl, secret
       ),
-      toolDef(
-        'check_payment_status',
-        'Check if a payment for an order has been completed.',
-        {
-          orderId: { type: 'string', description: 'Order ID to check' },
-        },
-        ['orderId'],
-        backendUrl, secret
-      ),
+
       toolDef(
         'search_businesses',
         'Search for other registered VoiceBridge businesses.',
@@ -304,7 +299,14 @@ export async function getAgentSignedUrl(agentId: string): Promise<string> {
     `${ELEVENLABS_API}/convai/conversation/get_signed_url?agent_id=${agentId}`,
     { headers: { 'xi-api-key': apiKey() } }
   )
-  if (!res.ok) throw new Error('Failed to get signed URL')
+  if (!res.ok) {
+    const errText = await res.text()
+    throw new Error(
+      res.status === 404 
+        ? `Agent not found in ElevenLabs (${res.status}). It may have been deleted. Please 'Recreate' the agent in the VoiceBridge dashboard.`
+        : `Failed to get signed URL (${res.status}): ${errText}`
+    )
+  }
   const data = await res.json() as { signed_url: string }
   return data.signed_url
 }

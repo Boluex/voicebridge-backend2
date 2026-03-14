@@ -5,19 +5,17 @@ type PdfParseResult = { text: string }
 type MammothResult = { value: string }
 
 /**
- * Extract and summarize content from various file types.
- * Returns plain text ready to be injected into the ElevenLabs agent system prompt.
+ * Extract text content from various file types.
+ * Uses Anthropic Claude for image OCR and AI-powered web scraping.
  */
 export async function extractAndSummarize(type: string, inputPath: string): Promise<string> {
   const ext = type.toLowerCase()
 
   try {
-    // ── Images: OCR extraction ────────────────────────────────────────────────
     if (['jpg', 'jpeg', 'png', 'webp', 'gif', 'image'].includes(ext)) {
       return await extractImageText(inputPath)
     }
 
-    // ── PDF ──────────────────────────────────────────────────────────────────
     if (ext === 'pdf') {
       try {
         const pdfParseModule = await import('pdf-parse/lib/pdf-parse.js')
@@ -25,9 +23,8 @@ export async function extractAndSummarize(type: string, inputPath: string): Prom
         const buffer = fs.readFileSync(inputPath)
         const data = await pdfParse(buffer) as PdfParseResult
         const text = cleanText(data.text)
-        // If PDF has very little extractable text (scanned), try image OCR
         if (text.length < 100) {
-          console.log(`[aiExtractor] PDF has little text, trying image OCR...`)
+          console.log('[aiExtractor] PDF has little text, trying image OCR...')
           return await extractImageText(inputPath, 'pdf')
         }
         return text
@@ -37,7 +34,6 @@ export async function extractAndSummarize(type: string, inputPath: string): Prom
       }
     }
 
-    // ── Word documents ───────────────────────────────────────────────────────
     if (['doc', 'docx'].includes(ext)) {
       try {
         const mammoth = await import('mammoth')
@@ -49,12 +45,10 @@ export async function extractAndSummarize(type: string, inputPath: string): Prom
       }
     }
 
-    // ── Plain text / CSV ─────────────────────────────────────────────────────
     if (['txt', 'csv'].includes(ext)) {
       return cleanText(fs.readFileSync(inputPath, 'utf-8'))
     }
 
-    // ── XLSX — read as raw text ───────────────────────────────────────────────
     if (ext === 'xlsx') {
       try {
         const content = fs.readFileSync(inputPath, 'utf-8')
@@ -64,7 +58,6 @@ export async function extractAndSummarize(type: string, inputPath: string): Prom
       }
     }
 
-    // ── Website URL scraping ─────────────────────────────────────────────────
     if (ext === 'url') {
       return await scrapeWebsite(inputPath)
     }
@@ -77,78 +70,66 @@ export async function extractAndSummarize(type: string, inputPath: string): Prom
   }
 }
 
-// ─── Image text extraction — tiered approach ──────────────────────────────────
-// Tier 1 (free): Tesseract OCR — good for printed menus, price lists, clear text
-// Tier 2 (paid): Claude Vision — better for complex layouts, handwriting, photos
+// ─── Image OCR: Tesseract (free) → Anthropic Claude Vision (paid) ─────────────
 async function extractImageText(filePath: string, hint = 'image'): Promise<string> {
-  // Try Tesseract first (free, no API key needed)
-  const tesseractResult = await tryTesseract(filePath)
+  console.log(`[aiExtractor] Image OCR starting: ${path.basename(filePath)}`)
 
-  // If Tesseract got meaningful text (>50 chars), use it
+  // Tier 1: Tesseract (free, local — works if installed and in PATH)
+  const tesseractResult = await tryTesseract(filePath)
   if (tesseractResult && tesseractResult.length > 50) {
-    console.log(`[aiExtractor] Tesseract extracted ${tesseractResult.length} chars from ${path.basename(filePath)}`)
+    console.log(`[aiExtractor] ✓ Tesseract succeeded: ${tesseractResult.length} chars`)
     return tesseractResult
   }
 
-  // Tesseract failed or got little text — try Claude Vision if key is available
-  const anthropicKey = process.env.ANTHROPIC_API_KEY
-  if (anthropicKey) {
-    console.log(`[aiExtractor] Tesseract got little text, trying Claude Vision...`)
-    return await extractImageWithVision(filePath, hint)
+  // Tier 2: Anthropic Claude Vision
+  const anthropicKey = (process.env.ANTHROPIC_API_KEY || '').trim()
+  if (anthropicKey.length > 0) {
+    console.log('[aiExtractor] Trying Anthropic Vision OCR...')
+    return await extractImageWithAnthropic(filePath, hint, anthropicKey)
   }
 
-  // No Vision key — return whatever Tesseract got or a placeholder
-  if (tesseractResult) return tesseractResult
-  return `[Image content from ${path.basename(filePath)} — set ANTHROPIC_API_KEY for better OCR, or install Tesseract]`
+  console.warn('[aiExtractor] No OCR method available. Set ANTHROPIC_API_KEY in backend .env')
+  if (tesseractResult && tesseractResult.length > 0) return tesseractResult
+  return `[Image ${path.basename(filePath)} — No OCR configured. Add ANTHROPIC_API_KEY to backend .env]`
 }
 
-// ─── Tesseract OCR (free, local) ─────────────────────────────────────────────
+// ─── Tesseract OCR (free, local) ──────────────────────────────────────────────
 async function tryTesseract(filePath: string): Promise<string | null> {
   try {
-    // Dynamic import — tesseract is optional (npm install node-tesseract-ocr)
     const tesseract = await import('node-tesseract-ocr').catch(() => null)
     if (!tesseract) {
-      // tesseract package not installed — skip silently
+      console.log('[aiExtractor] node-tesseract-ocr not installed — skipping')
       return null
     }
-
-    const text = await (tesseract as any).recognize(filePath, {
-      lang: 'eng',
-      oem: 1,   // LSTM neural net mode
-      psm: 3,   // Automatic page segmentation
-    })
-    return cleanText(text)
+    const text = await (tesseract as any).recognize(filePath, { lang: 'eng', oem: 1, psm: 3 })
+    const cleaned = cleanText(text)
+    console.log(`[aiExtractor] Tesseract extracted ${cleaned.length} chars`)
+    return cleaned
   } catch (err) {
-    // Tesseract binary not installed on system — skip silently
-    console.log(`[aiExtractor] Tesseract unavailable (${(err as Error).message.slice(0, 60)})`)
+    console.log(`[aiExtractor] Tesseract unavailable: ${(err as Error).message.slice(0, 80)}`)
     return null
   }
 }
 
-// ─── Claude Vision OCR (paid, better quality) ────────────────────────────────
-async function extractImageWithVision(filePath: string, hint = 'image'): Promise<string> {
-  const anthropicKey = process.env.ANTHROPIC_API_KEY
-  if (!anthropicKey) {
-    return `[Image ${path.basename(filePath)} — install node-tesseract-ocr or set ANTHROPIC_API_KEY for OCR]`
-  }
-
+// ─── Anthropic Claude Vision OCR ─────────────────────────────────────────────
+async function extractImageWithAnthropic(filePath: string, hint: string, apiKey: string): Promise<string> {
   try {
     const buffer = fs.readFileSync(filePath)
     const base64 = buffer.toString('base64')
-
-    // Determine media type
     const ext = path.extname(filePath).toLowerCase().replace('.', '')
     const mediaTypeMap: Record<string, string> = {
       jpg: 'image/jpeg', jpeg: 'image/jpeg',
-      png: 'image/png', webp: 'image/webp',
-      gif: 'image/gif', pdf: 'image/jpeg', // PDFs converted to image fallback
+      png: 'image/png', webp: 'image/webp', gif: 'image/gif',
     }
     const mediaType = mediaTypeMap[ext] || 'image/jpeg'
 
+    console.log(`[aiExtractor] Sending to Anthropic Vision: ${path.basename(filePath)} (${mediaType}, ${Math.round(buffer.length / 1024)}KB)`)
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
+      signal: AbortSignal.timeout(60000),
       headers: {
-        'x-api-key': anthropicKey,
+        'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
@@ -158,57 +139,59 @@ async function extractImageWithVision(filePath: string, hint = 'image'): Promise
         messages: [{
           role: 'user',
           content: [
-            {
-              type: 'image',
-              source: { type: 'base64', media_type: mediaType, data: base64 },
-            },
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
             {
               type: 'text',
-              text: `Extract ALL text and useful business information from this ${hint}. 
-Include: menu items with prices, business hours, contact info, services offered, policies, FAQs, descriptions — anything relevant to a business AI receptionist.
-Format as clean readable text. Be thorough.`,
+              text: `Extract ALL text and useful business information from this ${hint}. Include: menu items with prices, business hours, contact info, services offered, policies, FAQs. Format as clean readable text. Be thorough.`
             },
-          ],
+          ] as any, // Cast to any to bypass strict literal typing combining text and image objects
         }],
       }),
     })
 
+    const responseText = await response.text()
+    console.log(`[aiExtractor] Anthropic Vision response: ${response.status}`)
+
     if (!response.ok) {
-      const err = await response.text()
-      throw new Error(`Claude Vision failed (${response.status}): ${err}`)
+      throw new Error(`Anthropic API ${response.status}: ${responseText.slice(0, 200)}`)
     }
 
-    const data = await response.json() as { content: Array<{ type: string; text?: string }> }
+    const data = JSON.parse(responseText) as { content: Array<{ type: string; text?: string }> }
     const text = data.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
-
-    console.log(`[aiExtractor] Vision OCR extracted ${text.length} chars from ${path.basename(filePath)}`)
+    console.log(`[aiExtractor] ✓ Anthropic Vision extracted ${text.length} chars`)
     return cleanText(text)
 
   } catch (err) {
-    console.error('[aiExtractor] Vision extraction failed:', (err as Error).message)
+    console.error('[aiExtractor] Anthropic Vision failed:', (err as Error).message)
     return `[Image ${path.basename(filePath)} — OCR failed: ${(err as Error).message}]`
   }
 }
 
-// ─── Website scraper ──────────────────────────────────────────────────────────
+// ─── Website scraper + AI extraction ─────────────────────────────────────────
 async function scrapeWebsite(url: string): Promise<string> {
   try {
+    console.log(`[aiExtractor] Scraping ${url}...`)
     const response = await fetch(url, {
-      headers: { 'User-Agent': 'VoiceBridge-Bot/1.0 (Business Knowledge Scraper)' },
-      signal: AbortSignal.timeout(15000),
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+      },
+      signal: AbortSignal.timeout(20000),
     })
 
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
 
     const html = await response.text()
 
-    // Strip scripts, styles, nav, footer — keep content
-    const text = html
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, ' ')
-      .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, ' ')
-      .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, ' ')
+    // Strip noise, preserve readable text with structure
+    const rawText = html
+      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+      .replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, '')
+      .replace(/<svg[^>]*>[\s\S]*?<\/svg>/gi, '')
+      .replace(/<\/(p|div|li|tr|h[1-6]|section|article)>/gi, '\n')
+      .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<[^>]+>/g, ' ')
       .replace(/&nbsp;/g, ' ')
       .replace(/&amp;/g, '&')
@@ -216,15 +199,86 @@ async function scrapeWebsite(url: string): Promise<string> {
       .replace(/&gt;/g, '>')
       .replace(/&#\d+;/g, ' ')
       .replace(/\s{2,}/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
       .trim()
-      .slice(0, 50000)
+      .slice(0, 15000)
 
-    console.log(`[aiExtractor] Scraped ${text.length} chars from ${url}`)
-    return `[Content from ${url}]\n\n${text}`
+    console.log(`[aiExtractor] Raw scraped: ${rawText.length} chars from ${url}`)
+
+    // Use Claude to extract structured business info from the raw text
+    const anthropicKey = (process.env.ANTHROPIC_API_KEY || '').trim()
+    if (anthropicKey.length > 0 && rawText.length > 100) {
+      console.log('[aiExtractor] Using Claude to extract business info from scraped content...')
+      return await extractBusinessInfoWithAI(url, rawText, anthropicKey)
+    }
+
+    console.log('[aiExtractor] No ANTHROPIC_API_KEY — returning raw scraped text')
+    return `[Content from ${url}]\n\n${rawText}`
 
   } catch (err) {
     console.error(`[aiExtractor] Scraping failed for ${url}:`, err)
     return `[Failed to scrape ${url} — ${(err as Error).message}]`
+  }
+}
+
+// ─── Claude-powered business info extractor ───────────────────────────────────
+async function extractBusinessInfoWithAI(url: string, rawText: string, apiKey: string): Promise<string> {
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: AbortSignal.timeout(30000),
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 3000,
+        messages: [{
+          role: 'user',
+          content: `You are extracting business information from a website to train an AI phone receptionist.
+
+Website URL: ${url}
+
+Raw scraped content:
+${rawText}
+
+Extract and organize ALL useful business information into clear sections. Include EVERYTHING you can find:
+- Business name and description
+- Products / services offered (with prices if available)
+- Menu items (full menu with prices and descriptions)
+- Business hours / opening times
+- Location / address / delivery areas
+- Contact information (phone, email, social media)
+- Ordering process / how to order
+- Payment methods accepted
+- Delivery / pickup options and fees
+- Special offers or promotions
+- FAQs or policies (returns, reservations, etc.)
+- Any other info useful for a customer calling in
+
+Format as clean organized text with clear section headings. Skip sections where no info is found. Be thorough — this is what the AI receptionist will use to answer customer calls.`,
+        }],
+      }),
+    })
+
+    const responseText = await response.text()
+    console.log(`[aiExtractor] Claude extraction response: ${response.status}`)
+
+    if (!response.ok) {
+      console.error('[aiExtractor] Claude extraction failed:', responseText.slice(0, 300))
+      return `[Content from ${url}]\n\n${rawText}`
+    }
+
+    const data = JSON.parse(responseText) as { content: Array<{ type: string; text?: string }> }
+    const extracted = data.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+    console.log(`[aiExtractor] ✓ Claude extracted ${extracted.length} chars from ${url}`)
+    return `[Content from ${url}]\n\n${extracted}`
+
+  } catch (err) {
+    console.error('[aiExtractor] Claude extraction error:', (err as Error).message)
+    return `[Content from ${url}]\n\n${rawText}`
   }
 }
 

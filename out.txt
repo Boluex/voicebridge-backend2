@@ -1,0 +1,6 @@
+Environment variables loaded from .env
+Prisma schema loaded from prisma\schema.prisma
+Error: 
+EPERM: operation not permitted, rename 'C:\Users\olade\Desktop\code projects\voicebridge-fixed\backend\node_modules\.prisma\client\query_engine-windows.dll.node.tmp17920' -> 'C:\Users\olade\Desktop\code projects\voicebridge-fixed\backend\node_modules\.prisma\client\query_engine-windows.dll.node'
+
+

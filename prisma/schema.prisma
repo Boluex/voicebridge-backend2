@@ -13,7 +13,7 @@ model User {
   email        String     @unique
   passwordHash String?
   name         String
-  clerkId      String?    @unique
+  googleId     String?    @unique
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
   businesses   Business[]
@@ -59,8 +59,10 @@ model Business {
   aiPhoneNumber   String?
 
   // Payment
-  paystackPublicKey  String?
-  paystackSecretKey  String?
+  // Payout Bank Details
+  bankName           String?
+  accountName        String?
+  accountNumber      String?
   orderWebhookUrl    String?
   notificationEmail  String?
   escalationPhone    String?

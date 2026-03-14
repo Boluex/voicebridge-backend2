@@ -3,40 +3,33 @@ import prisma from '../lib/prisma.js'
 
 const router = Router()
 
-/**
- * ElevenLabs Conversational AI Webhook
- * Receives call events: call_started, call_ended, transcript_available
- * Configure this URL in your ElevenLabs agent settings
- */
 router.post('/', async (req: Request, res: Response) => {
   res.status(200).json({ received: true })
 
   try {
     const event = JSON.parse((req.body as Buffer).toString()) as {
-      type:         string
-      agent_id:     string
+      type:            string
+      agent_id:        string
       conversation_id: string
       call_duration_secs?: number
-      transcript?:  Array<{ role: string; message: string }>
-      caller_id?:   string
-      metadata?:    Record<string, unknown>
+      transcript?:     Array<{ role: string; message: string }>
+      caller_id?:      string
+      metadata?:       Record<string, unknown>
     }
 
     console.log(`[ElevenLabs Webhook] Event: ${event.type} | Agent: ${event.agent_id}`)
 
-    // Find business by agentId
     const business = await prisma.business.findFirst({
       where: { agentId: event.agent_id },
     })
     if (!business) return
 
     if (event.type === 'conversation_initiation_metadata') {
-      // New call started — create call record
       await prisma.call.create({
         data: {
           businessId:       business.id,
           callerNumber:     event.caller_id || 'Unknown',
-          status:           'COMPLETED', // will update on end
+          status:           'COMPLETED',
           elevenlabsCallId: event.conversation_id,
           language:         business.primaryLanguage,
         },
@@ -59,10 +52,6 @@ router.post('/', async (req: Request, res: Response) => {
       })
 
       console.log(`[ElevenLabs] Call ended: ${event.conversation_id} — ${event.call_duration_secs}s`)
-    }
-
-    if (event.type === 'agent_response') {
-      // Could use for real-time monitoring — skip for now
     }
   } catch (err) {
     console.error('[ElevenLabs Webhook] Error:', err)

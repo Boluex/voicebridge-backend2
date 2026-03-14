@@ -8,7 +8,7 @@ import { Router, Request, Response } from 'express'
 import prisma from '../lib/prisma.js'
 import { createPaymentLink } from '../services/paystack.js'
 import { v4 as uuid } from 'uuid'
-import nodemailer from 'nodemailer'
+import { sendPaymentEmail as sendPaymentResendEmail } from '../services/email.js'
 
 const router = Router()
 
@@ -128,6 +128,8 @@ router.post('/create-order', async (req: Request, res: Response) => {
   }
 })
 
+// (Removed legacy payment-status tools)
+
 // ─── Tool: send_payment_link ──────────────────────────────────────────────────
 router.post('/send-payment-link', async (req: Request, res: Response) => {
   if (!verifyAgentSecret(req, res)) return
@@ -152,8 +154,8 @@ router.post('/send-payment-link', async (req: Request, res: Response) => {
 
     const reference = `VB-${uuid().slice(0, 8).toUpperCase()}`
 
-    // Use business's Paystack key if available, else platform key
-    const paystackKey = order.business.paystackSecretKey || process.env.PAYSTACK_SECRET_KEY!
+    // Use platform Paystack key for all transactions to collect money centrally
+    const paystackKey = process.env.PAYSTACK_SECRET_KEY!
 
     const paymentLink = await createPaymentLink({
       amount:      order.subtotal,
@@ -172,48 +174,27 @@ router.post('/send-payment-link', async (req: Request, res: Response) => {
     })
 
     // Send email with payment link
-    await sendPaymentEmail({
-      to:          order.customerEmail,
+    const itemsList = (order.items as any[])
+      .map((i: any) => `${i.qty}x ${i.name} @ ₦${i.price?.toLocaleString()}`)
+      .join(', ')
+    await sendPaymentResendEmail({
+      to:           order.customerEmail,
       customerName: order.customerName || 'Customer',
       businessName: order.business.name,
       amount:       order.subtotal,
+      items:        itemsList,
       paymentUrl:   paymentLink.url,
-      orderId:      order.id,
     })
 
     res.json({
       success:     true,
-      message:     `Payment link sent to ${order.customerEmail}. The link will expire in 24 hours.`,
+      message:     `Payment link sent to ${order.customerEmail}. Tell the caller to check their email and that the link will expire soon.`,
       paymentUrl:  paymentLink.url,
       reference,
     })
   } catch (err) {
     console.error('[send-payment-link]', err)
     res.json({ success: false, message: 'Could not generate payment link. Please try again.' })
-  }
-})
-
-// ─── Tool: check_payment_status ───────────────────────────────────────────────
-router.post('/payment-status', async (req: Request, res: Response) => {
-  if (!verifyAgentSecret(req, res)) return
-
-  try {
-    const { orderId } = req.body as { orderId: string }
-
-    const order = await prisma.order.findUnique({ where: { id: orderId } })
-    if (!order) {
-      res.json({ paid: false, status: 'not_found' })
-      return
-    }
-
-    if (order.status === 'PAID') {
-      res.json({ paid: true, message: 'Payment received! Your order has been confirmed.' })
-      return
-    }
-
-    res.json({ paid: false, status: order.status, message: 'Payment not yet received. The link is still active.' })
-  } catch (err) {
-    res.json({ paid: false, message: 'Could not check payment status.' })
   }
 })
 
@@ -263,52 +244,5 @@ router.post('/search-businesses', async (req: Request, res: Response) => {
     res.json({ found: false, message: 'Could not search businesses right now.' })
   }
 })
-
-// ─── Helper: send payment email ───────────────────────────────────────────────
-async function sendPaymentEmail(params: {
-  to:           string
-  customerName: string
-  businessName: string
-  amount:       number
-  paymentUrl:   string
-  orderId:      string
-}) {
-  // If no SENDGRID key, log and skip (dev mode)
-  if (!process.env.SENDGRID_API_KEY && process.env.NODE_ENV === 'development') {
-    console.log(`[DEV] Payment email would be sent to ${params.to}: ${params.paymentUrl}`)
-    return
-  }
-
-  const transporter = nodemailer.createTransport({
-    host:   'smtp.sendgrid.net',
-    port:   587,
-    secure: false,
-    auth:   { user: 'apikey', pass: process.env.SENDGRID_API_KEY },
-  })
-
-  await transporter.sendMail({
-    from:    `"${process.env.EMAIL_FROM_NAME || 'VoiceBridge'}" <${process.env.EMAIL_FROM || 'noreply@voicebridge.io'}>`,
-    to:      params.to,
-    subject: `Payment required — Order from ${params.businessName}`,
-    html: `
-      <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px">
-        <h2 style="margin:0 0 8px">Hi ${params.customerName},</h2>
-        <p>Your order from <strong>${params.businessName}</strong> is ready for payment.</p>
-        <div style="background:#f5f5f5;border-radius:8px;padding:20px;margin:24px 0">
-          <p style="margin:0;font-size:14px;color:#666">Order Total</p>
-          <p style="margin:4px 0 0;font-size:28px;font-weight:700">₦${params.amount.toLocaleString()}</p>
-        </div>
-        <a href="${params.paymentUrl}"
-           style="display:block;background:#6366f1;color:#fff;text-align:center;padding:16px;border-radius:10px;text-decoration:none;font-weight:600;font-size:16px">
-          Pay Now (Secure via Paystack)
-        </a>
-        <p style="margin-top:20px;font-size:12px;color:#999">
-          Order reference: ${params.orderId.slice(-8).toUpperCase()}<br/>
-          This link expires in 24 hours. Powered by VoiceBridge.
-        </p>
-      </div>
-    `,
-  })
-}
 
 export default router

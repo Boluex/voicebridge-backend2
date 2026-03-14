@@ -1,0 +1,3 @@
+src/routes/auth.ts(138,50): error TS2353: Object literal may only specify known properties, and 'clerkId' does not exist in type 'UserSelect<DefaultArgs>'.
+src/services/aiExtractor.ts(21,45): error TS7016: Could not find a declaration file for module 'pdf-parse/lib/pdf-parse.js'. 'C:/Users/olade/Desktop/code projects/voicebridge-fixed/backend/node_modules/pdf-parse/lib/pdf-parse.js' implicitly has an 'any' type.
+  Try `npm i --save-dev @types/pdf-parse` if it exists or add a new declaration (.d.ts) file containing `declare module 'pdf-parse/lib/pdf-parse.js';`

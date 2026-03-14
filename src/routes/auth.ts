@@ -1,16 +1,10 @@
-
-
-
-
-
-
-
 import { Router, Request, Response } from 'express'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { z } from 'zod'
 import prisma from '../lib/prisma.js'
 import { authenticate, AuthRequest } from '../middleware/auth.js'
+import { sendWelcomeEmail } from '../services/email.js'
 
 const router = Router()
 
@@ -25,13 +19,7 @@ const LoginSchema = z.object({
   password: z.string(),
 })
 
-// Clerk OAuth Schema — when user signs in with Google via Clerk
-const ClerkSyncSchema = z.object({
-  clerkId:  z.string(),
-  email:    z.string().email(),
-  name:     z.string(),
-  imageUrl: z.string().optional(),
-})
+
 
 function signToken(id: string, email: string) {
   return jwt.sign(
@@ -51,6 +39,11 @@ router.post('/register', async (req: Request, res: Response) => {
     const passwordHash = await bcrypt.hash(data.password, 12)
     const user = await prisma.user.create({ data: { name: data.name, email: data.email, passwordHash } })
     const token = signToken(user.id, user.email)
+
+    // Send welcome email (non-blocking)
+    sendWelcomeEmail({ to: user.email, name: user.name }).catch(e =>
+      console.error('[register] Welcome email failed:', e.message)
+    )
 
     res.status(201).json({ token, user: { id: user.id, name: user.name, email: user.email } })
   } catch (err) {
@@ -78,35 +71,54 @@ router.post('/login', async (req: Request, res: Response) => {
   }
 })
 
-// POST /api/auth/clerk-sync — called by frontend after Clerk Google OAuth
-// Creates or finds the user in our DB, returns a VoiceBridge JWT
-router.post('/clerk-sync', async (req: Request, res: Response) => {
+// Google OAuth Schema
+const GoogleAuthSchema = z.object({
+  accessToken: z.string(),
+})
+
+// POST /api/auth/google — Verify Google token and login/register user
+router.post('/google', async (req: Request, res: Response) => {
   try {
-    const data = ClerkSyncSchema.parse(req.body)
+    const { accessToken } = GoogleAuthSchema.parse(req.body)
+
+    // Fetch user profile from Google using the access token
+    const googleRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+
+    if (!googleRes.ok) {
+      res.status(401).json({ error: 'Invalid Google token' })
+      return
+    }
+
+    const googleUser = await googleRes.json() as { sub: string; email: string; name: string }
 
     let user = await prisma.user.findFirst({
-      where: { OR: [{ clerkId: data.clerkId }, { email: data.email }] },
+      where: { OR: [{ googleId: googleUser.sub }, { email: googleUser.email }] },
     })
 
     let isNew = false
 
     if (!user) {
-      // New user — create record
+      // New user
       user = await prisma.user.create({
         data: {
-          clerkId:      data.clerkId,
-          email:        data.email,
-          name:         data.name,
-          passwordHash: null, // OAuth users have no password
+          googleId:     googleUser.sub,
+          email:        googleUser.email,
+          name:         googleUser.name,
+          passwordHash: null,
         },
       })
       isNew = true
-      console.log(`[Auth] New Clerk user: ${user.email}`)
-    } else if (!user.clerkId) {
-      // Existing email/password user — link their Clerk ID
+      console.log(`[Auth] New Google user: ${user.email}`)
+      sendWelcomeEmail({ to: user.email, name: user.name }).catch(e =>
+        console.error('[google] Welcome email failed:', e.message)
+      )
+    } else if (!user.googleId) {
+      // Link existing email to Google Account
       user = await prisma.user.update({
         where: { id: user.id },
-        data:  { clerkId: data.clerkId },
+        data:  { googleId: googleUser.sub },
       })
     }
 
@@ -114,8 +126,8 @@ router.post('/clerk-sync', async (req: Request, res: Response) => {
     res.json({ token, user: { id: user.id, name: user.name, email: user.email }, isNew })
   } catch (err) {
     if (err instanceof z.ZodError) { res.status(400).json({ error: 'Validation error', details: err.errors }); return }
-    console.error('[clerk-sync]', err)
-    res.status(500).json({ error: 'Clerk sync failed' })
+    console.error('[google]', err)
+    res.status(500).json({ error: 'Google sign-in failed' })
   }
 })
 
@@ -123,7 +135,7 @@ router.post('/clerk-sync', async (req: Request, res: Response) => {
 router.get('/me', authenticate, async (req: AuthRequest, res: Response) => {
   const user = await prisma.user.findUnique({
     where:  { id: req.user!.id },
-    select: { id: true, name: true, email: true, clerkId: true, createdAt: true },
+    select: { id: true, name: true, email: true, googleId: true, createdAt: true },
   })
   res.json({ user })
 })
