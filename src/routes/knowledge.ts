@@ -6,6 +6,17 @@ import { authenticate, AuthRequest } from '../middleware/auth.js'
 import prisma from '../lib/prisma.js'
 import { extractAndSummarize } from '../services/aiExtractor.js'
 import { updateElevenLabsAgent } from '../services/elevenlabs.js'
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3'
+
+// Configure S3 Client for Cloudflare R2
+const s3Client = new S3Client({
+  region: 'auto',
+  endpoint: `https://${process.env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: process.env.CLOUDFLARE_R2_ACCESS_KEY_ID || '',
+    secretAccessKey: process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY || '',
+  },
+})
 
 const router = Router()
 router.use(authenticate)
@@ -146,10 +157,24 @@ router.delete('/:businessId/:sourceId', async (req: AuthRequest, res: Response) 
   if (!source) { res.status(404).json({ error: 'Not found' }); return }
 
   if (source.fileUrl) {
-    const uploadDir = (process.env.UPLOAD_DIR || './uploads').replace(/\/$/, '')
-    const filename = source.fileUrl.replace(/^\/uploads\//, '')
-    const filePath = `${uploadDir}/${filename}`
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+    if (source.fileUrl.startsWith('/uploads/')) {
+      const uploadDir = (process.env.UPLOAD_DIR || './uploads').replace(/\/$/, '')
+      const filename = source.fileUrl.replace(/^\/uploads\//, '')
+      const filePath = `${uploadDir}/${filename}`
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+    } else {
+      // Delete from R2
+      try {
+        const urlObj = new URL(source.fileUrl)
+        const key = decodeURIComponent(urlObj.pathname.replace(/^\//, ''))
+        await s3Client.send(new DeleteObjectCommand({
+          Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
+          Key: key,
+        }))
+      } catch (err) {
+        console.error('[Knowledge] Failed to delete from R2:', err)
+      }
+    }
   }
 
   await prisma.knowledgeSource.delete({ where: { id: source.id } })
@@ -162,9 +187,42 @@ async function processSource(sourceId: string, type: string, inputPath: string, 
     const extractedText = await extractAndSummarize(type, inputPath)
     const chunks = Math.max(1, Math.ceil(extractedText.length / 500))
 
+    let fileUrlUpdate = {}
+    if (type !== 'url' && type !== 'faq' && fs.existsSync(inputPath)) {
+      try {
+        const fileBuffer = fs.readFileSync(inputPath)
+        const filename = path.basename(inputPath)
+        
+        let contentType = 'application/octet-stream'
+        const ext = path.extname(inputPath).toLowerCase()
+        if (ext === '.pdf') contentType = 'application/pdf'
+        else if (['.jpg', '.jpeg'].includes(ext)) contentType = 'image/jpeg'
+        else if (ext === '.png') contentType = 'image/png'
+        else if (ext === '.webp') contentType = 'image/webp'
+        else if (ext === '.csv') contentType = 'text/csv'
+        else if (ext === '.txt') contentType = 'text/plain'
+
+        const key = `knowledge/${businessId}/${filename}`
+        await s3Client.send(new PutObjectCommand({
+          Bucket: process.env.CLOUDFLARE_R2_BUCKET_NAME,
+          Key: key,
+          Body: fileBuffer,
+          ContentType: contentType,
+        }))
+
+        const publicUrl = (process.env.CLOUDFLARE_R2_PUBLIC_URL || '').replace(/\/$/, '')
+        fileUrlUpdate = { fileUrl: `${publicUrl}/${key}` }
+
+        // Clean up the local temporary file to free up server storage space
+        fs.unlinkSync(inputPath)
+      } catch (err) {
+        console.error('[Knowledge] Failed to upload to R2:', err)
+      }
+    }
+
     await prisma.knowledgeSource.update({
       where: { id: sourceId },
-      data:  { content: extractedText, chunkCount: chunks, status: 'INDEXED' },
+      data:  { content: extractedText, chunkCount: chunks, status: 'INDEXED', ...fileUrlUpdate },
     })
 
     console.log(`[Knowledge] ✓ Indexed ${type} (${chunks} chunks) for business ${businessId}`)
